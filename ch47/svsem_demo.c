@@ -11,7 +11,7 @@ union semun {                   /* Used in calls to semctl() */
     int                 val;
     struct semid_ds *   buf;
     unsigned short *    array;
-#if defined(__linux__)
+#if defined(__linux_)
     struct seminfo *    __buf;
 #endif
 };
@@ -53,8 +53,3 @@ int main(int arg, char *argv[]) {
   
   return 0;
 }
-
-
-
-
-
