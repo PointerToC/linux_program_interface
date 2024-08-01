@@ -38,21 +38,43 @@ int main(int arg, char *argv[]) {
   
   for (int i = 0; i < data_num; ++i) {
     send_data[i] = (char *)malloc(sizeof(char) * data_len[i]);
-    memset(send_data[i], '1', data_len[i] - 1);
-    send_data[i][data_len[i] - 1] = '\n';
+    memset(send_data[i], '1', data_len[i]);
   }
 
+  printf("send_data[0] = %ld\n", strlen(send_data[0]));
+  printf("send_data[1] = %ld\n", strlen(send_data[1]));
+
   // semaphore
-  const char *sem_name = "/time_sem";
-  sem_t *sem_ptr = NULL;
-  if ((sem_ptr = sem_open(sem_name, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR, 0)) == SEM_FAILED) {
+  const char *sem_name_endwrite = "/sem_endwrite";
+  const char *sem_name_endread = "/sem_endread";
+  sem_unlink(sem_name_endwrite);
+  sem_unlink(sem_name_endread);
+
+  sem_t *sem_ptr_endwrite = NULL;
+  sem_t *sem_ptr_endread = NULL;
+
+  if ((sem_ptr_endwrite = sem_open(sem_name_endwrite, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR, 0)) == SEM_FAILED) {
     free(recv_buff);
     free_data(send_data, data_num);
-    perror("sem_open");
+    perror("sem_end_write, sem_open");
     return -1;
   }
 
-  if (sem_unlink(sem_name) == -1) {
+  if ((sem_ptr_endread = sem_open(sem_name_endread, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR, 0)) == SEM_FAILED) {
+    free(recv_buff);
+    free_data(send_data, data_num);
+    perror("sem_endread,sem_open");
+    return -1;
+  }
+
+  if (sem_unlink(sem_name_endwrite) == -1) {
+    free(recv_buff);
+    free_data(send_data, data_num);
+    perror("sem_unlink");
+    return -1;
+  }
+
+  if (sem_unlink(sem_name_endread) == -1) {
     free(recv_buff);
     free_data(send_data, data_num);
     perror("sem_unlink");
@@ -127,13 +149,11 @@ int main(int arg, char *argv[]) {
 
     struct timespec end_read_ts;
     for (int i = 0; i < data_num; ++i) {
-      int cnt = 0;
       int read_cnt = 0;
-      while ((cnt = read(pipe_fd[0], recv_buff, recv_cap)) != -1) {
-          read_cnt += cnt;
-      }
+      read_cnt = read(pipe_fd[0], recv_buff, recv_cap);
+      printf("child proc, read_cnt = %d\n", read_cnt);
 
-      if (cnt == -1) {
+      if (read_cnt == -1) {
         perror("read failed!");
         return -1;
       }
@@ -143,13 +163,18 @@ int main(int arg, char *argv[]) {
         return -1;
       }
 
-      sem_wait(sem_ptr);
+      printf("child proc wait for sem_endwrite\n");
+      sem_wait(sem_ptr_endwrite);
+      printf("child proc get sem_endwrite\n");
 
       memcpy((void *)&ts, shm_addr, sizeof(struct timespec));
       //calculate time
       printf("read_cnt = %d, total_cnt = %d\n", read_cnt, data_len[i]);
       printf("start time : seconds = %ld, nanoseconds = %ld\n", ts.tv_sec, ts.tv_nsec);
       printf("end read time : seconds = %ld, nanoseconds = %ld\n", end_read_ts.tv_sec, end_read_ts.tv_nsec);
+
+      sem_post(sem_ptr_endread);
+      printf("child proc post sem_endread\n");
     }
 
     return 0;
@@ -169,24 +194,23 @@ int main(int arg, char *argv[]) {
       }
 
       int write_sum = 0;
-      int w_cnt = 0;
-      while ((w_cnt = write(pipe_fd[1], (void *)send_data[i], data_len[i])) > 0) {
-        if (w_cnt == -1) {
-          perror("write failed!");
-          return -1;
-        } else if (w_cnt == 0) {
-          break;
-        } else {
-          write_sum += w_cnt;
-        }
-        
+      write_sum = write(pipe_fd[1], (void *)send_data[i], data_len[i]);
+      printf("parent proc, write_sum = %d\n", write_sum);
+      
+      if (write_sum == -1) {
+        perror("write failed!");
+        return -1;
       }
 
       memcpy((void *)shm_addr, (void *)&ts, sizeof(struct timespec));
-      sem_post(sem_ptr);
 
-      printf("write complete, sem post\n");
-      printf("write_sum = %d, total_cnt = %d\n", write_sum, data_len[i]);
+      sem_post(sem_ptr_endwrite);
+      printf("parent proc write complete, post sem_end_write\n");
+      printf("parent proc write_sum = %d, total_cnt = %d\n", write_sum, data_len[i]);
+
+      printf("parent proc wait for sem_endread\n");
+      sem_wait(sem_ptr_endread);
+      printf("parent proc get sem_endread\n");
     }
     free_data(send_data, data_num);
     free(recv_buff);
@@ -200,7 +224,6 @@ int main(int arg, char *argv[]) {
   }
   return 0;
 }
-
 
 void free_data(char *data[], int data_num) {
   for (int i = 0; i < data_num; ++i) {
