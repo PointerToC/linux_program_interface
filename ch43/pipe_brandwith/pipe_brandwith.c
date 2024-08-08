@@ -26,7 +26,6 @@ int main(int arg, char *argv[]) {
   // recv buff
   long long recv_cap = 10000000;
   char *recv_buff = (char*)malloc(sizeof(char) * recv_cap);
-  assert(recv_buff != NULL);
 
   // generate test data
   int data_num = atoi(argv[1]);
@@ -46,8 +45,6 @@ int main(int arg, char *argv[]) {
   // semaphore
   const char *sem_name_endwrite = "/sem_endwrite";
   const char *sem_name_endread = "/sem_endread";
-  sem_unlink(sem_name_endwrite);
-  sem_unlink(sem_name_endread);
 
   sem_t *sem_ptr_endwrite = NULL;
   sem_t *sem_ptr_endread = NULL;
@@ -83,33 +80,13 @@ int main(int arg, char *argv[]) {
   // for time
   struct timespec ts;
 
-  // for shared mem
-  const char *shm_name = "/time_share";
-  int shm_fd;
-  int sh_size = sizeof(struct timespec);
-  void *shm_addr = NULL;
-
-  if ((shm_fd = shm_open(shm_name, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
+  // use ANONYMOUS, MAP_SHARED shm
+  size_t shm_size = sizeof(struct timespec);
+  void *shm_addr = mmap(NULL, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (shm_addr == MAP_FAILED) {
     free(recv_buff);
     free_data(send_data, data_num);
-    perror("shm_open");
-    return 1;
-  }
-
-  if (ftruncate(shm_fd, sh_size) == -1) {
-    free(recv_buff);
-    free_data(send_data, data_num);
-    close(shm_fd);
-    perror("ftruncate");
-    return 1;
-  }
-
-  if ((shm_addr = mmap(NULL, sh_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0)) == MAP_FAILED) {
-    free(recv_buff);
-    free_data(send_data, data_num);
-    close(shm_fd);
     perror("mmap");
-    return 1;
   }
 
   // pipe
@@ -117,7 +94,7 @@ int main(int arg, char *argv[]) {
   if (pipe(pipe_fd) == -1) {
     free(recv_buff);
     free_data(send_data, data_num);
-    shm_unlink(shm_name);
+    munmap(shm_addr, shm_size);
     perror("pipe failed!");
     return 1;
   }
@@ -126,11 +103,14 @@ int main(int arg, char *argv[]) {
   if (pid == -1) {
     free(recv_buff);
     free_data(send_data, data_num);
-    shm_unlink(shm_name);
+    munmap(shm_addr, shm_size);
     perror("fork failed!");
     return 1;
   } else if (pid == 0) {      // child process
     if (close(pipe_fd[1]) == -1) {
+        free(recv_buff);
+        free_data(send_data, data_num);
+        munmap(shm_addr, shm_size);
         perror("close write pipe failed!");
         return 1;
     }
@@ -167,6 +147,10 @@ int main(int arg, char *argv[]) {
 
     free_data(send_data, data_num);
     free(recv_buff);
+    if (munmap(shm_addr, shm_size) == -1) {
+      perror("munmap in child process");
+      return 1;
+    }
 
     if (close(pipe_fd[0]) == -1) {
       perror("close pipe_fd[0]");
@@ -176,14 +160,20 @@ int main(int arg, char *argv[]) {
     return 0;
   } else {      // parent process
     if (close(pipe_fd[0]) == -1) {
-        perror("close read pipe failed!");
-        return 1;
+      free(recv_buff);
+      free_data(send_data, data_num);
+      munmap(shm_addr, shm_size);
+      perror("close read pipe failed!");
+      return 1;
     }
 
     for (int i = 0; i < data_num; ++i) {
       sem_wait(sem_ptr_endread);
 
       if (clock_gettime(CLOCK_REALTIME, &ts) == -1) {
+        free(recv_buff);
+        free_data(send_data, data_num);
+        munmap(shm_addr, shm_size);
         perror("get clock time failed!");
         return 1;
       }
@@ -192,6 +182,9 @@ int main(int arg, char *argv[]) {
       write_sum = write(pipe_fd[1], (void *)send_data[i], data_len[i]);
       
       if (write_sum == -1) {
+        free(recv_buff);
+        free_data(send_data, data_num);
+        munmap(shm_addr, shm_size);
         perror("write failed!");
         return 1;
       }
@@ -204,6 +197,9 @@ int main(int arg, char *argv[]) {
     int status;
     waitpid(pid, &status, 0);
     if (status != 0) {
+      free(recv_buff);
+      free_data(send_data, data_num);
+      munmap(shm_addr, shm_size);
       printf("child process exit status: %d\n", status);
       return 1;
     }
@@ -211,17 +207,15 @@ int main(int arg, char *argv[]) {
     free_data(send_data, data_num);
     free(recv_buff);
 
+    if (munmap(shm_addr, shm_size) == -1) {
+      perror("munmap failed in parent process");
+      return -1;
+    }
+
     if (close(pipe_fd[1]) == -1) {
       perror("close pipe_fd[1]");
       return 1;
     }
-
-    munmap(shm_addr, sizeof(struct timespec));
-    if (close(shm_fd) == -1) {
-      perror("close shm_fd");
-      return 1;
-    }
-    shm_unlink(shm_name);
   }
   return 0;
 }
